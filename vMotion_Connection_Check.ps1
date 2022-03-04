@@ -167,7 +167,7 @@ if($vmhostList.count -gt 0){
 					if($thisResult.Summary.PacketLost -eq 0){
 						$testPassed = $true
 						write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
-						write-host `t`t`t`t"PASS: $localVMK $localVMKip >> $($params.interface) $($params.host) $($params.size)bytes" -ForegroundColor Green
+						# write-host `t`t`t`t"PASS: $localVMK $localVMKip >> $($params.interface) $($params.host) $($params.size)bytes" -ForegroundColor Green
 						$passCounter++
 					}
 					else{
