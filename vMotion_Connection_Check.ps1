@@ -1,6 +1,6 @@
 # $DebugPreference = "Continue"
 $DebugPreference = "SilentlyContinue"
-$ScriptVersion = "2022.03.1.2"
+$ScriptVersion = "2022.03.1.4"
 $StartDate = Get-Date
 #Select Number of Pings to perform per VMK test
 [int]$NumOfPings = 2
@@ -20,15 +20,16 @@ write-host ""
 write-host "Connect to all relavent vCenter instances before running this script" -ForegroundColor Yellow
 Write-Host ("="*80) -ForegroundColor DarkGreen
 write-host ""
-$selectDC = New-Object System.Management.Automation.Host.ChoiceDescription "&Datacenter","Pick a datacenter"
-$selectCluster = New-Object System.Management.Automation.Host.ChoiceDescription "&Cluster","Pick a cluster"
+$selectDC = New-Object System.Management.Automation.Host.ChoiceDescription "&Datacenter","CSV Listing of vCenter Datacenter(s)"
+$selectCluster = New-Object System.Management.Automation.Host.ChoiceDescription "&Cluster","CSV list of vCenter Cluster(s)"
+$selectHosts = New-Object System.Management.Automation.Host.ChoiceDescription "&Hosts","CSV list of multiple host names"
 $selectAll = New-Object System.Management.Automation.Host.ChoiceDescription "&All","All Hosts in current connection"
 $defaultPings = New-Object System.Management.Automation.Host.ChoiceDescription "&Default","Leave Ping count at $NumOfPings"
 $changePings = New-Object System.Management.Automation.Host.ChoiceDescription "&Change","Increase or decrease the number of test pings"
 $cancel = New-Object System.Management.Automation.Host.ChoiceDescription "&Exit","Eject! Eject! Eject!"
 
 $title = "DC or All Hosts?";$message = "Run against a single Datacenter or All Hosts?"
-$options = [System.Management.Automation.Host.ChoiceDescription[]]($selectDC,$selectCluster,$selectAll,$cancel)
+$options = [System.Management.Automation.Host.ChoiceDescription[]]($selectDC,$selectCluster,$selectHosts,$selectAll,$cancel)
 $result = $host.UI.PromptForChoice($title, $message, $options, 1)
 Write-Host ""
 switch($result){
@@ -59,13 +60,32 @@ switch($result){
 		}
 	}
 	2{
+		$hostNames = Read-Host -Prompt "Which vCenter ESXi Hosts to check? (Comma seperated for multiple host names)"
+		if($hostNames){
+			$hostnameList = $hostNames -split ","
+			if($hostnameList.count -ge 2){
+				write-host "You have selected to check all vMotion adapters for " -NoNewline
+				write-host $($hostnameList) -ForegroundColor Cyan
+				$vmhostList = Get-VMHost $hostnameList|Where-Object{$_.ConnectionState -match "connected|maintenance"}|Sort-Object Parent,Name
+			}
+			else{
+				write-host "Minumum of 2 ESXi hosts required to test vMotion" -ForegroundColor Yellow
+				Exit-Script
+			}
+		}
+		else{
+			write-host "missing host names, please try again"
+			Exit-Script
+		}
+	}
+	3{
 		write-host "You have opted to check every vMotion adapter in the currently connected vCenter instance(s)"
 		write-host "NOTE:" -ForegroundColor Red
 		Write-Host "This will generate a lot of failures trying to connect between CBO and Datacenter vMotion VLANs"
 		write-host "You will need to manually reconcile these failures afterwards to determine validity of communication failures."
 		$vmhostList = Get-VMHost|Where-Object{$_.ConnectionState -match "connected|maintenance"}|Sort-Object Parent,Name
 	}
-	3{
+	4{
 		write-host "Cancelling"
 		Exit-Script
 	}
@@ -78,23 +98,24 @@ $options = [System.Management.Automation.Host.ChoiceDescription[]]($defaultPings
 $result = $host.UI.PromptForChoice($title, $message, $options, 0)
 switch ($result){
 	0{
-		write-host "Testing with default PING count of $NumOfPings"
+		write-host "Testing with default PING count"
 
 	}
 	1{
-		write-host "You selected to change the test PING count.  Provide an integer form 1-100"
+		write-host "You selected to change the test PING count.  Provide an integer from 1-100"
 		write-host "*NOTE:" -ForegroundColor Yellow -NoNewline;write-host "Increasing the number of PINGs can greatly increase the time to test."
 		write-host "Modify this setting with caution."
 		[int]$NumOfPings = Read-Host -Prompt "Provide new number of Pings to test per VMK connection:"
 	}
 }
+write-host ""
 write-host "Testing with " -NoNewline
 write-host $NumOfPings -ForegroundColor Cyan -NoNewline
 write-host " pings per VMK test"
 Write-Host ("="*80) -ForegroundColor DarkGreen
 write-host ""
 
-
+$testCounter = $mtuCounter = $passCounter = $failCounter = 0
 if($vmhostList.count -gt 0){
 	$hostCount = $vmhostList.count
 	write-host "Found " -NoNewline
@@ -109,19 +130,19 @@ if($vmhostList.count -gt 0){
 	write-host " adapters to test communications on"
 	write-host ""
 	write-host "Beginning Host Testing, this can take a while depending on the number of hosts and vMotion Kernel ports..."
-	write-host $(Get-Date)
+	write-host $(Get-Date) -ForegroundColor Yellow
 	$vMotionReport = @()
 	$h = 1
 	$vmhostList|ForEach-Object{
 		$localVMHost = $_.Name
-		Write-Progress -Id 1 -Activity "Testing Host $_ | v$ScriptVersion | Started:$StartDate" -Status "$localVMHost [ $h of $hostCount ]" -PercentComplete (($h/$hostCount)*100);$h++
-		write-host "$(Get-Date)" -ForegroundColor Cyan -NoNewline
+		Write-Progress -Id 1 -Activity "Testing Host vMotion Connections | v$ScriptVersion | Started:$StartDate" -Status "$localVMHost [ $h of $hostCount ]" -PercentComplete (($h/$hostCount)*100);$h++
+		write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
 		write-host `t" Testing " -NoNewline;write-host $localVMHost -ForegroundColor Cyan
 		$esxcli = Get-EsxCli -VMHost $_ -V2
 		$params = $esxcli.network.diag.ping.CreateArgs()
 		$localKernels = $_|Get-VMHostNetworkAdapter -VMKernel|Where-Object{$_.VMotionEnabled}
 		write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
-		write-host `t`t`t`t"Found $($localKernels.count) local VMK to test"
+		write-host `t`t"Found $($localKernels.count) local VMK to test"
 		$k = 1
 		$localKernels|foreach-Object{
 			Write-Progress -Id 2 -ParentId 1 -Activity "Testing Local VMK Ports" -Status "$($_.Name) [ $k of $($localKernels.count) ]" -PercentComplete (($k/$($localKernels.count))*100);$k++
@@ -131,100 +152,101 @@ if($vmhostList.count -gt 0){
 			$localMTU = $_.Mtu
 			$v = 1
 			$vMOadapters|ForEach-Object{
-				$testCounter++
-				Write-Progress -Id 3 -ParentId 2 -Activity "Testing Remote VMK Ports" -Status "$($_.Name) on $($_.VMhost.Name) [ $v of $vmkCount ]" -PercentComplete (($v/$vmkCount)*100);$v++
-				if($localMTU -ne $_.Mtu){
-					write-host `t`t`t`t">> MTU MISMATCH <<" -ForegroundColor Yellow
-					$mtuMismatch = $true
-					$mtuCounter++
-				}
-				else{
-					$mtuMismatch = $false
-				}
-				$arrMTU = @($localMTU,$_.Mtu)
-				$maxMTU = ($arrMTU|Measure-Object -Minimum).Minimum
-				Write-Debug -Message "MTU: $maxMTU, from Local:$localMTU Remote:$($_.Mtu)"
-				if ($maxMTU -eq 1500) {
-					$thisPacket = '1472'
-					write-host `t`t`t`t">> NO JUMBOS <<" -ForegroundColor Yellow
-				}
-				else{
-					$thisPacket = '8972'
-				}
-				$params.host = $_.IP
-				$params.size = $thisPacket
-				$params.interface = $localVMK
-				$params.netstack = $localStack
-				$params.count = $NumOfPings
-				Write-Debug -Message "HOST: $($params.host)"
-				Write-Debug -Message "Size: $($params.size)"
-				Write-Debug -Message "VMK: $($params.interface)"
-				Write-Debug -Message "STCK: $($params.netstack)"
-				Write-Debug -Message "PINGs: $($params.count)"
-				$thisResult = $null;$error.Clear();$testErrorValue=""
-				try {
-					$thisResult = $esxcli.network.diag.ping.Invoke($params)
-					if($thisResult.Summary.PacketLost -eq 0){
-						$testPassed = $true
-						write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
-						# write-host `t`t`t`t"PASS: $localVMK $localVMKip >> $($params.interface) $($params.host) $($params.size)bytes" -ForegroundColor Green
-						$passCounter++
+				if(!($_.IP -eq $localVMKip)){
+					$testCounter++
+					Write-Progress -Id 3 -ParentId 2 -Activity "Testing Remote VMK Ports" -Status "$($_.Name) on $($_.VMhost.Name) [ $v of $vmkCount ]" -PercentComplete (($v/$vmkCount)*100);$v++
+					if($localMTU -ne $_.Mtu){
+						write-host `t`t">> MTU MISMATCH <<" -ForegroundColor Yellow
+						$mtuMismatch = $true
+						$mtuCounter++
 					}
 					else{
-						$testPassed = $false
-						write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
-						write-host `t`t`t`t"FAIL: $localVMK $localVMKip >> $($params.interface) $($params.host) $($params.size)bytes" -ForegroundColor Red
-						$failCounter++
+						$mtuMismatch = $false
 					}
-					$packetStats = "$($thisResult.Summary.Transmitted);$($thisResult.Summary.Received);$($thisResult.Summary.PacketLost)"
-				}
-				catch {
-					if ($error.Exception.Message|ForEach-Object{$_ -like "*Network is unreachable*"}){
-						write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
-						write-host `t`t`t`t"Network is unreachable: $localVMK $localVMKip >> $($params.interface) $($params.host)" -ForegroundColor Red
-						$testErrorValue = "Destination Newtork Unreachable"
+					$arrMTU = @($localMTU,$_.Mtu)
+					$maxMTU = ($arrMTU|Measure-Object -Minimum).Minimum
+					Write-Debug -Message "MTU: $maxMTU, from Local:$localMTU Remote:$($_.Mtu)"
+					if ($maxMTU -eq 1500) {
+						$thisPacket = '1472'
+						write-host `t`t">> NO JUMBOS <<" -ForegroundColor Yellow
 					}
 					else{
-						write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
-						write-host `t`t`t`t"ESXCLI Error: $localVMK $localVMKip >> $($params.interface) $($params.host)" -ForegroundColor Red
-						$testErrorValue = "Unknown"
+						$thisPacket = '8972'
 					}
+					$params.host = $_.IP
+					$params.size = $thisPacket
+					$params.interface = $localVMK
+					$params.netstack = $localStack
+					$params.count = $NumOfPings
+					Write-Debug -Message "HOST: $($params.host)"
+					Write-Debug -Message "Size: $($params.size)"
+					Write-Debug -Message "VMK: $($params.interface)"
+					Write-Debug -Message "STCK: $($params.netstack)"
+					Write-Debug -Message "PINGs: $($params.count)"
+					$thisResult = $null;$error.Clear();$testErrorValue=""
+					try {
+						$thisResult = $esxcli.network.diag.ping.Invoke($params)
+						if($thisResult.Summary.PacketLost -eq 0){
+							$testPassed = $true
+							$passCounter++
+						}
+						else{
+							$testPassed = $false
+							write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
+							write-host `t`t"FAIL: $localVMK $localVMKip >> $($params.interface) $($params.host) $($params.size)bytes" -ForegroundColor Red
+							$failCounter++
+						}
+						$packetStats = "$($thisResult.Summary.Transmitted);$($thisResult.Summary.Received);$($thisResult.Summary.PacketLost)"
+					}
+					catch {
+						if ($error.Exception.Message|ForEach-Object{$_ -like "*Network is unreachable*"}){
+							write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
+							write-host `t`t"Network is unreachable: $localVMK $localVMKip >> $($params.interface) $($params.host)" -ForegroundColor Red
+							$testErrorValue = "Destination Newtork Unreachable"
+						}
+						else{
+							write-host "$(Get-Date -UFormat "%R")" -ForegroundColor Cyan -NoNewline
+							write-host `t`t"ESXCLI Error: $localVMK $localVMKip >> $($params.interface) $($params.host)" -ForegroundColor Red
+							$testErrorValue = "Unknown"
+						}
+					}
+					
+					$columnList = @('SourceHost','SourceVMK','SourceIP','SourceMTU','DestinationHost','DestinationVMK','DestinationIP','DestinationMTU','PacketSize','testPassed','Stats T/R/L','mtuMismatch','Error')
+					$row = ""|Select-Object $columnList
+					$row.SourceHost = $localVMHost
+					$row.SourceVMK = $localVMK
+					$row.SourceIP = $localVMKip
+					$row.SourceMTU = $localMTU
+					$row.DestinationHost = $_.VMhost
+					$row.DestinationVMK = $_.Name
+					$row.DestinationIP = $_.IP
+					$row.DestinationMTU = $_.Mtu
+					$row.PacketSize = $thisPacket
+					$row.mtuMismatch = $mtuMismatch
+					$row.Error = $testErrorValue
+					if($thisResult){
+						$row.testPassed = $testPassed
+						$row."Stats T/R/L" = $packetStats
+					}
+					else{
+						$row.testPassed = $false
+						$row."Stats T/R/L" = ""
+					}
+					$vMotionReport += $row
 				}
-				
-				$columnList = @('SourceHost','SourceVMK','SourceIP','SourceMTU','DestinationHost','DestinationVMK','DestinationIP','DestinationMTU','PacketSize','testPassed','Stats T/R/L','mtuMismatch','Error')
-				$row = ""|Select-Object $columnList
-				$row.SourceHost = $localVMHost
-				$row.SourceVMK = $localVMK
-				$row.SourceIP = $localVMKip
-				$row.SourceMTU = $localMTU
-				$row.DestinationHost = $_.VMhost
-				$row.DestinationVMK = $_.Name
-				$row.DestinationIP = $_.IP
-				$row.DestinationMTU = $_.Mtu
-				$row.PacketSize = $thisPacket
-				$row.mtuMismatch = $mtuMismatch
-				$row.Error = $testErrorValue
-				if($thisResult){
-					$row.testPassed = $testPassed
-					$row."Stats T/R/L" = $packetStats
-				}
-				else{
-					$row.testPassed = $false
-					$row."Stats T/R/L" = ""
-				}
-				$vMotionReport += $row
+				else{write-debug -Message "Self-Test, skipping"}
 			}
 		}
 	}
 	write-host ""
 	Write-Host ("="*80) -ForegroundColor DarkGreen
-	write-host "Passed:" -NoNewline;write-host $passCounter -ForegroundColor Green
-	write-host "Failed:" -NoNewline;write-host $failCounter -ForegroundColor Red
-	write-host "FailurePercent:" -NoNewline;write-host "$([math]::Round((($failCounter/$testCounter)*100),1))" -ForegroundColor Cyan
-	write-host "Number of MTU Mismatch connections:" -NoNewline;write-host $mtuCounter -ForegroundColor Cyan
+	write-host "Passed:  " -NoNewline;write-host $passCounter -ForegroundColor Green
+	write-host "Failed:  " -NoNewline;write-host $failCounter -ForegroundColor Red
+	write-host "FailurePercent:  " -NoNewline;write-host "$([math]::Round((($failCounter/$testCounter)*100),1))" -ForegroundColor Cyan
+	write-host "Number of MTU Mismatch connections:  " -NoNewline;write-host $mtuCounter -ForegroundColor Cyan
 	Write-Host ("="*80) -ForegroundColor DarkGreen
 	write-host "Saving Report to Disk:"
-	write-host $ReportFile-foregroundColor Cyan
+	write-host $ReportFile -foregroundColor Cyan
 	$vMotionReport|Export-Csv -NoTypeInformation $ReportFile
 }
 else{
